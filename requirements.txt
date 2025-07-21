@@ -1,0 +1,29 @@
+# Core dependencies
+numpy==1.23.5
+pandas==1.5.3
+
+# Deep learning
+torch==1.13.1
+torchvision==0.14.1
+
+# Image and video processing
+opencv-python==4.8.1.78
+pillow==9.5.0
+
+# Plotting and visualization
+matplotlib==3.6.3
+seaborn==0.12.2
+livelossplot==0.5.4
+bokeh==2.4.3
+
+# Utilities
+tqdm==4.66.1
+ipywidgets==7.7.2
+
+# Testing
+pytest==7.4.0
+
+# For web-based inference UI
+gradio==3.41.2  # or latest stable
+# OR
+streamlit==1.25.0

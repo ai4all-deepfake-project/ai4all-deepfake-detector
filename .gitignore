@@ -1,0 +1,69 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Model weights and logs
+*.pth
+*.pt
+*.ckpt
+*.log
+*.log.*
+
+# Dataset artifacts
+data/
+datasets/
+frames/
+*.mp4
+*.avi
+*.mov
+*.webm
+*.jpg
+*.jpeg
+*.png
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Python environment
+.env
+.venv/
+env/
+venv/
+pip-wheel-metadata/
+*.egg-info/
+dist/
+build/
+
+# VSCode and IDE configs
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Gradio/Streamlit artifacts
+gradio_cached_examples/
+*.streamlit/
+
+# Test artifacts
+htmlcov/
+coverage.xml
+.pytest_cache/
+
+# Notebook output
+*.out
+*.svg
+
+# Requirements lock files (optional)
+poetry.lock
+Pipfile.lock
