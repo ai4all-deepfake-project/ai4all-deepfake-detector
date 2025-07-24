@@ -1,4 +1,35 @@
 # data.py
+import os 
+import glob 
+import random
+from sklearn.model_selection import train_test_split
+
+# Step 1: Load all image paths and label them
+def load_image_paths(base_dir="frames"):
+    data = [] # will hold tuples: (image_path, label)
+    label_map = {"Real": 0, "Fake": 1}
+
+    for label_name, label in label_map.items():
+        folder = os.path.join(base_dir, label_name) # e.g frames/Real or frames/Fake
+        image_paths = glob.glob(os.path.join(folder, "*.jpg")) # list of all .jpg files in the folder
+        for path in image_paths:
+            data.append((path, label)) # append (image_oath, label) to data list
+
+# Step 2: Shuffle and split data into train, val test sets
+def split_data(data, seed=42, train_ratio=0.8, val_ratio=0.1):
+    random.seed(seed) # set seed
+    random.shuffle(data) # shuffle data list in-place
+
+    total = len(data) # total num of samples
+    train_end = int(train_ratio * total) # index cuttoff for train split
+    val_end = int((train_ratio, + val_ratio) * total) # index cutoff for val split
+
+    train = data[:train_end] # first chunk = train
+    val = data[train_end:val_end] # next chunk = val
+    test = data[val_end:] # remaining = test
+
+    return train, val, test
+
 
 """
 TODO:
