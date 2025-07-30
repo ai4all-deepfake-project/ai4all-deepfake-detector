@@ -42,7 +42,7 @@ With the increasing realism of AI-generated videos, deepfakes threaten trust in 
 
 This project was completed in collaboration with:
 
-- Michael Rosas Ceronio ([GitHub](https://github.com/michaelroscero) | michael.rosasceronio@example.com)
+- Michael Rosas Ceronio ([GitHub](https://github.com/michaelroscero)
 - [Other teammate names and emails or GitHubs here]
 
 Developed as part of the AI4ALL Ignite Program (2025 Cohort).
