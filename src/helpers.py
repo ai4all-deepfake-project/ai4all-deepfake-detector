@@ -3,8 +3,6 @@
 """
 This module contains lightweight, reusable utilities to support training, evaluation, and reproducibility.
 
-TODO:
-
 1. set_seed(seed: int)
    - Ensure reproducibility across NumPy, Python, and PyTorch.
    - Keeps experiments consistent for debugging and comparison.
