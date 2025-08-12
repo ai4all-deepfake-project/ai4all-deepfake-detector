@@ -1,137 +1,310 @@
-# data.py
-import os 
-import glob 
+# src/data.py
+"""
+Optimized data handling for SDFVD 2.0 deepfake dataset.
+Uses helpers.py functions instead of nested functions for better modularity.
+"""
+
+import os
+import glob
+import cv2
 import random
-from sklearn.model_selection import train_test_split
-from torch.utils.data import Dataset
+from pathlib import Path
+from typing import List, Tuple, Dict, Optional
+
+import numpy as np
+from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
+from torchvision.transforms import InterpolationMode
 
-# Step 1: Load all image paths and label them
-def load_image_paths(base_dir="frames"):
-    data = [] # will hold tuples: (image_path, label)
-    label_map = {"Real": 0, "Fake": 1}
+# Import from helpers.py instead of defining locally
+from src.helpers import (
+    parse_original_from_video_stem,
+    label_from_name, 
+    dir_has_videos,
+    find_label_dirs,
+    groups_to_indices,
+    safe_group_stratified_split
+)
 
-    for label_name, label in label_map.items():
-        folder = os.path.join(base_dir, label_name) # e.g frames/Real or frames/Fake
-        image_paths = glob.glob(os.path.join(folder, "*.jpg")) # list of all .jpg files in the folder
-        for path in image_paths:
-            data.append((path, label)) # append (image_oath, label) to data list
+# ========================= CONSTANTS & TRANSFORMS =========================
 
-# Step 2/3: Shuffle and split data into train, val test sets
-# def split_data(data, seed=42, train_ratio=0.8, val_ratio=0.1):
-#     random.seed(seed) # set seed
-#     random.shuffle(data) # shuffle data list in-place
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD = [0.229, 0.224, 0.225]
 
-#     total = len(data) # total num of samples
-#     train_end = int(train_ratio * total) # index cuttoff for train split
-#     val_end = int((train_ratio, + val_ratio) * total) # index cutoff for val split
+_TRAIN_TFMS = transforms.Compose([
+    transforms.Resize(256, interpolation=InterpolationMode.BILINEAR),
+    transforms.RandomCrop(224), transforms.RandomHorizontalFlip(0.5),
+    transforms.ToTensor(), transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
+])
 
-#     train = data[:train_end] # first chunk = train
-#     val = data[train_end:val_end] # next chunk = val
-#     test = data[val_end:] # remaining = test
+_EVAL_TFMS = transforms.Compose([
+    transforms.Resize(256, interpolation=InterpolationMode.BILINEAR),
+    transforms.CenterCrop(224), transforms.ToTensor(),
+    transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD)
+])
 
-#     return train, val, test
+# ========================== FRAME EXTRACTION =============================
 
-def stratified_split(data, seed=42, train_ratio=0.8, val_ratio=0.1):
-    paths = [item[0] for item in data]
-    labels = [item[1] for item in data]
+def extract_frames_from_folder(input_folder: str, output_folder: str, frame_interval=5, 
+                               video_exts=(".mp4", ".mov", ".mkv", ".avi"), limit_per_video=None):
+    """Extract frames from all videos in folder."""
+    os.makedirs(output_folder, exist_ok=True)
+    
+    try:
+        video_files = [f for f in os.listdir(input_folder) 
+                      if any(f.lower().endswith(e) for e in video_exts)]
+    except FileNotFoundError:
+        print(f"[warn] Missing folder: {input_folder}")
+        return
+    
+    if not video_files:
+        print(f"[warn] No videos in: {input_folder}")
+        return
+    
+    for video_file in video_files:
+        in_path = os.path.join(input_folder, video_file)
+        stem = os.path.splitext(video_file)[0]
+        cap = cv2.VideoCapture(in_path)
+        if not cap.isOpened():
+            continue
+        
+        frame_idx = saved = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok: break
+            if frame_idx % frame_interval == 0:
+                out_path = os.path.join(output_folder, f"{stem}_frame_{saved:03d}.jpg")
+                cv2.imwrite(out_path, frame)
+                saved += 1
+                if limit_per_video and saved >= limit_per_video: break
+            frame_idx += 1
+        cap.release()
+        print(f"[ok] {video_file}: saved {saved} frames")
 
-    # First split: train vs temp (val + test)
-    train_paths, temp_paths, train_labels, temp_labels = train_test_split(
-        paths, labels, test_size=(1 - train_ratio), stratify=labels, random_state=seed
+def extract_all_frames_sdfvd(dataset_root: str, output_root="frames", frame_interval=5, 
+                             limit_per_video=None, search_depth=2):
+    """Extract frames from SDFVD dataset structure using helpers.py functions."""
+    os.makedirs(output_root, exist_ok=True)
+    found = find_label_dirs(dataset_root, max_depth=search_depth)
+    
+    if not found["real"] and not found["fake"]:
+        print(f"[warn] No real/fake folders found under: {dataset_root}")
+        return
+    
+    for real_dir in found["real"]:
+        extract_frames_from_folder(real_dir, os.path.join(output_root, "Real"), 
+                                 frame_interval, limit_per_video=limit_per_video)
+    for fake_dir in found["fake"]:
+        extract_frames_from_folder(fake_dir, os.path.join(output_root, "Fake"), 
+                                 frame_interval, limit_per_video=limit_per_video)
+
+# ============================ DATA LOADING ===============================
+
+def load_image_paths_with_groups(base_dir="frames", extensions=(".jpg", ".jpeg", ".png")):
+    """Load frame paths with group information using helpers.py parsing."""
+    items = []
+    for sub, dir_label in [("Real", 0), ("Fake", 1)]:
+        folder = os.path.join(base_dir, sub)
+        if not os.path.isdir(folder): continue
+        for ext in extensions:
+            for path in glob.glob(os.path.join(folder, f"*{ext}")):
+                stem = Path(path).stem
+                original_id, label_from_name = parse_original_from_video_stem(stem)
+                use_label = dir_label if label_from_name == -1 else label_from_name
+                items.append((path, use_label, original_id))
+    return items
+
+def stratified_group_split(data, seed=42, train_ratio=0.8, val_ratio=0.1):
+    """Group-aware split using helpers.py functions."""
+    if not data: raise ValueError("No data to split.")
+    
+    # Group mapping
+    group_to_label = {}
+    for _, lbl, grp in data:
+        group_to_label.setdefault(grp, lbl)
+    
+    groups = list(group_to_label.keys())
+    y = [group_to_label[g] for g in groups]
+    
+    # Use helpers.py function for stratified splitting
+    train_groups, val_groups, test_groups = safe_group_stratified_split(
+        groups, y, train_ratio, val_ratio, seed
     )
+    
+    # Map back to items using helpers.py function
+    train_idx = groups_to_indices(data, train_groups)
+    val_idx = groups_to_indices(data, val_groups)
+    test_idx = groups_to_indices(data, test_groups)
+    
+    return ([(data[i][0], data[i][1]) for i in train_idx],
+            [(data[i][0], data[i][1]) for i in val_idx],
+            [(data[i][0], data[i][1]) for i in test_idx])
 
-    # Calculate relative val/test split
-    val_size = val_ratio / (1 - train_ratio)
+# ========================== DATASET & LOADERS ============================
 
-    val_paths, test_paths, val_labels, test_labels = train_test_split(
-        temp_paths, temp_labels, test_size=(1 - val_size), stratify=temp_labels, random_state=seed
-    )
-
-    # Zip them back into (path, label) tuples
-    train = list(zip(train_paths, train_labels))
-    val = list(zip(val_paths, val_labels))
-    test = list(zip(test_paths, test_labels))
-
-    return train, val, test
-
-
-# Step 4:  Create custom Dataset class for loading frames
 class DeepFakeFrameDataset(Dataset):
-    def __init__(self, data, transform=None):
-        '''
-        Args:
-           data: list of tuples (image_path, label)
-           transform: optional torchvision transforms
-        '''
+    def __init__(self, data: List[Tuple[str, int]], transform=None):
         self.data = data
-        self.transform = transform or transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(), # Converts [0, 255] to [0.0, 1.0]
-        ])
-
-    def __len__(self):
-        return len(self.data)
+        self.transform = transform or _EVAL_TFMS
+    
+    def __len__(self): return len(self.data)
     
     def __getitem__(self, idx):
-        image_path, label = self.data[idx]
-        image = Image.open(image_path).convert("RGB")
-        image = self.transform(image)
-        return image, label
+        path, label = self.data[idx]
+        img = Image.open(path).convert("RGB")
+        return self.transform(img), label
+
+def create_dataloaders(train_data, val_data, test_data, batch_size=32, num_workers=0, pin_memory=False):
+    """Create train/val/test dataloaders."""
+    datasets = [
+        DeepFakeFrameDataset(train_data, _TRAIN_TFMS),
+        DeepFakeFrameDataset(val_data, _EVAL_TFMS),
+        DeepFakeFrameDataset(test_data, _EVAL_TFMS)
+    ]
     
-# Step 5: Create DotaLoaders
-def create_dataloaders(train_data, val_data, test_data, batch_size=32):
-    train_dataset = DeepFakeFrameDataset(train_data)
-    val_dataset = DeepFakeFrameDataset(val_data)
-    test_dataset = DeepFakeFrameDataset(test_data)
+    return tuple(DataLoader(ds, batch_size=batch_size, shuffle=(i == 0), 
+                           num_workers=num_workers, pin_memory=pin_memory) 
+                 for i, ds in enumerate(datasets))
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+def get_data_loaders(batch_size=32, valid_size=0.1, seed=42, num_workers=0, base_dir="frames", limit=None):
+    """Main interface for getting dataloaders."""
+    data_wg = load_image_paths_with_groups(base_dir=base_dir)
+    if limit and limit > 0:
+        random.Random(seed).shuffle(data_wg)
+        data_wg = data_wg[:limit]
+    
+    train, val, test = stratified_group_split(data_wg, seed=seed, train_ratio=0.8, val_ratio=valid_size)
+    tl, vl, te = create_dataloaders(train, val, test, batch_size=batch_size, num_workers=num_workers)
+    return {"train": tl, "valid": vl, "test": te}
 
-    return train_loader, val_loader, test_loader
+def get_dataloaders(config: Dict):
+    """Config-friendly wrapper for train.py usage."""
+    data_wg = load_image_paths_with_groups(config.get("base_dir", "frames"))
+    if config.get("limit"):
+        random.Random(config.get("seed", 42)).shuffle(data_wg)
+        data_wg = data_wg[:int(config.get("limit"))]
+    
+    train, val, test = stratified_group_split(
+        data_wg, 
+        seed=config.get("seed", 42),
+        train_ratio=config.get("train_ratio", 0.8),
+        val_ratio=config.get("val_ratio", 0.1)
+    )
+    return create_dataloaders(train, val, test, 
+                             batch_size=config.get("batch_size", 32), 
+                             num_workers=config.get("num_workers", 0))
 
-"""
-TODO:
-1. Load dataset:
-   - Read file paths and labels from the SDFVD 2.0 directory or metadata file (e.g., CSV or JSON).
-   - Label: 0 = Real, 1 = Fake
+def visualize_one_batch(data_loaders: Dict[str, DataLoader], max_n=5):
+    """Visualize sample batch from training data."""
+    import matplotlib.pyplot as plt
+    
+    if "train" not in data_loaders:
+        raise KeyError("data_loaders must contain a 'train' DataLoader")
+    
+    images, labels = next(iter(data_loaders["train"]))
+    
+    # Denormalize for display
+    inv = transforms.Compose([
+        transforms.Normalize(mean=[0.0, 0.0, 0.0], std=[1/s for s in _IMAGENET_STD]),
+        transforms.Normalize(mean=[-m for m in _IMAGENET_MEAN], std=[1.0, 1.0, 1.0])
+    ])
+    images = inv(images).clamp(0, 1).permute(0, 2, 3, 1).cpu()
+    
+    n = min(max_n, images.shape[0])
+    fig = plt.figure(figsize=(3*n, 3))
+    for i in range(n):
+        ax = fig.add_subplot(1, n, i + 1, xticks=[], yticks=[])
+        ax.imshow(images[i].numpy())
+        ax.set_title(["Real", "Fake"][int(labels[i])])
+    plt.tight_layout()
+    plt.show()
 
-2. Organize data:
-   - Group or tag augmented samples if needed (optional).
-   - Ensure no data leakage (e.g., same original video in train and test).
+# =============================================================================
+#                                   TESTS
+# =============================================================================
 
-3. Implement dataset splitting:
-   - Stratified train/val/test split (e.g., 80/10/10)
-   - Use a random seed for reproducibility
-   - Optionally save split lists (e.g., as JSON or CSV)
+import pytest
 
-4. Create PyTorch-style Dataset class:
-   - Load images or frames
-   - Return (image_path, label) or (image_tensor, label) depending on design
+def _make_tiny_sdfvd_video(path: str, nframes: int = 8, w: int = 64, h: int = 48):
+    """Create a small synthetic SDFVD-style video for testing."""
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    vw = cv2.VideoWriter(path, fourcc, 8.0, (w, h))
+    assert vw.isOpened()
+    for i in range(nframes):
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+        cv2.rectangle(img, (5 + 3 * i, 5), (15 + 3 * i, 15), (0, 255, 0), -1)
+        img[:, :, 0] = np.linspace(0, 255, w, dtype=np.uint8)
+        vw.write(img)
+    vw.release()
+    assert os.path.exists(path)
 
-5. Return DataLoaders:
-   - Basic batching (no transforms)
-   - Shuffling only for training set
-"""
+def test_extraction_and_group_split(tmp_path):
+    """Test the complete pipeline: extraction → grouping → splitting."""
+    # Create SDFVD-like tree with fuzzy-named dirs
+    ds = tmp_path / "SDFVD2.0"
+    (ds / "SDFVD2.0_real").mkdir(parents=True)
+    (ds / "SDFVD2.0_fake").mkdir(parents=True)
+    
+    # Two originals each, multiple augment indices
+    vids = [
+        ("real", "origA", [0, 1]),
+        ("real", "origB", [0]),
+        ("fake", "origX", [0, 1]),
+        ("fake", "origY", [0]),
+    ]
+    for prefix, orig, aug_ids in vids:
+        for a in aug_ids:
+            _make_tiny_sdfvd_video(str(ds / f"SDFVD2.0_{prefix}" / f"{prefix}_{orig}_aug_{a}.mp4"))
+    
+    out = tmp_path / "frames"
+    extract_all_frames_sdfvd(str(ds), output_root=str(out), frame_interval=2, limit_per_video=2)
+    
+    items = load_image_paths_with_groups(base_dir=str(out))
+    assert len(items) > 0
+    
+    # Ensure both labels present
+    labels = {lbl for _, lbl, _ in items}
+    assert labels == {0, 1}
+    
+    # Ensure no group leakage across splits
+    train, val, test = stratified_group_split(items, seed=7, train_ratio=0.8, val_ratio=0.1)
+    
+    # Extract groups from items and splits to verify no leakage
+    p2g = {p: g for p, _, g in items}
+    g_train = {p2g[p] for p, _ in train}
+    g_val = {p2g[p] for p, _ in val}
+    g_test = {p2g[p] for p, _ in test}
+    
+    assert g_train.isdisjoint(g_val)
+    assert g_train.isdisjoint(g_test)
+    assert g_val.isdisjoint(g_test)
 
+def test_loaders_shapes(tmp_path):
+    """Test dataloader creation and tensor shapes."""
+    # Minimal Real/Fake frame dirs with small fake images
+    base = tmp_path / "frames"
+    (base / "Real").mkdir(parents=True)
+    (base / "Fake").mkdir(parents=True)
+    
+    arr = np.zeros((40, 40, 3), dtype=np.uint8)
+    for i in range(6):
+        cv2.imwrite(str(base / "Real" / f"real_origA_aug_0_frame_{i:03d}.jpg"), arr)
+        cv2.imwrite(str(base / "Fake" / f"fake_origX_aug_1_frame_{i:03d}.jpg"), arr)
+    
+    loaders = get_data_loaders(batch_size=4, valid_size=0.2, seed=3, num_workers=0, base_dir=str(base))
+    xb, yb = next(iter(loaders["train"]))
+    assert xb.shape[1:] == (3, 224, 224)
+    assert yb.ndim == 1
 
-
-
-######################################################################################
-#                                     TESTS
-######################################################################################
-if __name__ == "__main__":
-    data = load_image_paths("frames")
-    print(f"Total samples: {len(data)}")
-
-    train, val, test = stratified_split(data)
-    print(f"Train: {len(train)}, Val: {len(val)}, Test: {len(test)}")
-
-    train_loader, val_loader, test_loader = create_dataloaders(train, val, test)
-
-    for batch_images, batch_labels in train_loader:
-        print(f"Batch shape: {batch_images.shape}, Labels: {batch_labels}")
-        break  # Just show one batch
+def test_helpers_integration():
+    """Test that helpers.py functions work correctly."""
+    # Test parse_original_from_video_stem from helpers
+    assert parse_original_from_video_stem("real_someOriginal_aug_4_frame_001") == ("someOriginal", 0)
+    assert parse_original_from_video_stem("fake_foo_aug_0") == ("foo", 1)
+    assert parse_original_from_video_stem("unknown_stem") == ("unknown_stem", -1)
+    
+    # Test label_from_name from helpers
+    assert label_from_name("SDFVD2.0_real") == "real"
+    assert label_from_name("fake_videos") == "fake"
+    assert label_from_name("random_dir") is None
