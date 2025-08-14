@@ -24,7 +24,6 @@ frames/
 *.webm
 *.jpg
 *.jpeg
-*.png
 
 # Temporary files
 *.tmp
