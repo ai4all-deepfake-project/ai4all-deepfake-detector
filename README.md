@@ -1,48 +1,60 @@
 # Deepfake Detection with CNNs – AI4ALL Ignite
 
-Built a deep learning pipeline to detect manipulated video content using the SDFVD 2.0 deepfake dataset. Leveraged OpenCV, PyTorch, and transfer learning (ResNet18 / EfficientNet) to extract facial frames and classify each as real or fake. Developed a full inference pipeline and model interpretability using Grad-CAM, all within AI4ALL’s Ignite accelerator.
+A deep learning–based system for classifying real and deepfake videos using the EfficientNet-B0 backbone.  
+The model processes video frame-by-frame, aggregates predictions, and outputs a probability score for deepfakes.  
 
-## Problem Statement <!--- do not change this line -->
+## Features
+- **Face-focused preprocessing** to target identity-specific features.
+- **EfficientNet-B0** CNN architecture for efficient, high-accuracy classification.
+- **Video inference pipeline** for frame extraction, prediction, and aggregation.
+- Supports **MP4/H.264 videos** for easy compatibility.
 
-With the increasing realism of AI-generated videos, deepfakes threaten trust in digital media, political stability, and online safety. Accurately detecting such manipulated content is critical for safeguarding public discourse, protecting individuals from misinformation, and enabling content moderation systems.
+## Dataset
+- Based on **Small-scale Deepfake Forgery Video Dataset (SDFVD) 2.0**.
+- Contains real and deepfake videos with built-in augmentation (rotation, scaling, brightness/contrast adjustments).
+- Preprocessing crops frames to facial regions to improve detection.
 
-## Key Results <!--- do not change this line -->
+## Installation
+```bash
+git clone https://github.com/yourusername/deepfake-detector.git
+cd deepfake-detector
+pip install -r requirements.txt
+````
 
-1. Built a complete video classification pipeline that detects deepfakes frame-by-frame and aggregates predictions for video-level inference.
-2. Trained a CNN model using ResNet18 and EfficientNet-B0 with over 900 real/fake videos from the SDFVD 2.0 dataset.
-3. Achieved over 85% frame-level classification accuracy on validation data.
-4. Integrated Grad-CAM to provide visual explanations of the model’s predictions by highlighting manipulated regions in fake frames.
+## Usage
 
-## Methodologies <!--- do not change this line -->
+### Training
 
-- Extracted and preprocessed frames from videos using OpenCV (resizing, face detection, normalization).
-- Labeled frames from SDFVD 2.0 as “real” or “fake” for supervised training.
-- Used PyTorch with pretrained CNN architectures (ResNet18 and EfficientNet-B0) for transfer learning.
-- Applied `CrossEntropyLoss` and optimized with `AdamW` to reduce overfitting.
-- Aggregated frame-level predictions via average fake probability to classify entire videos.
-- Applied Grad-CAM to visualize attention maps and interpret model decisions.
+```bash
+python train.py
+```
 
-## Data Sources <!--- do not change this line -->
+### Inference
 
-- **SDFVD 2.0: Small Scale Deep Fake Video Dataset**  
-  A dataset containing 461 real and 461 fake videos with facial augmentations.  
-  [Dataset on Mendeley](https://data.mendeley.com/datasets/zzb7jyy8w8/1)
+Run the Gradio app for video upload and prediction:
 
-## Technologies Used <!--- do not change this line -->
+```bash
+python app.py
+```
 
-- Python
-- PyTorch
-- OpenCV
-- TorchVision
-- Grad-CAM (`pytorch-gradcam`)
-- Google Colab
-- Matplotlib / seaborn (for plotting results)
+Or in Colab:
 
-## Authors <!--- do not change this line -->
+```python
+!pip install -r requirements.txt
+!python app.py
+```
 
-This project was completed in collaboration with:
+## Example
 
-- Michael Rosas Ceronio ([GitHub](https://github.com/michaelroscero)
-- [Other teammate names and emails or GitHubs here]
+Upload a video and get:
 
-Developed as part of the AI4ALL Ignite Program (2025 Cohort).
+```
+Video is likely Fake (Average Fake Probability: 0.7321)
+```
+
+## Next Steps
+
+* Improve accuracy with cleaner, more balanced datasets.
+* Experiment with additional fine-tuning of backbone layers.
+* Expand dataset diversity for better generalization.
+
