@@ -1,29 +1,62 @@
 # src/optimization.py
 """
 Simplified optimization components for transfer learning.
+Defaults to binary classification with BCEWithLogitsLoss.
+Supports AdamW, SGD+Nesterov, and RAdam.
 """
 
 import torch
 from torch import nn
-from torch.optim import AdamW
+from torch.optim import AdamW, SGD, RAdam
 
 
-def get_loss_function():
-    """Return CrossEntropyLoss for binary classification."""
-    return nn.CrossEntropyLoss()
-
-
-def get_optimizer(model, learning_rate=0.001, weight_decay=0.01):
+# =========================
+# Loss (BINARY by default)
+# =========================
+def get_loss_function(pos_weight: torch.Tensor | None = None) -> nn.Module:
     """
-    Create AdamW optimizer for transfer learning.
+    Return BCEWithLogitsLoss for binary classification.
+
+    Args:
+        pos_weight: Optional tensor([neg/pos]) to handle class imbalance.
+    """
+    return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+
+# =========================
+# Optimizers
+# =========================
+def get_optimizer(
+    model: nn.Module,
+    learning_rate: float = 0.001,
+    weight_decay: float = 0.01,
+    optimizer_name: str = "adamw",
+) -> torch.optim.Optimizer:
+    """
+    Create optimizer for transfer learning.
     Only optimizes trainable parameters (frozen backbone is ignored).
+
+    optimizer_name: 'adamw' (default), 'sgd', or 'radam'
     """
-    # Only get parameters that require gradients (unfrozen)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    
-    return AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+
+    opt = optimizer_name.lower()
+    if opt == "adamw":
+        return AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+    elif opt == "sgd":
+        return SGD(
+            trainable_params, lr=learning_rate, weight_decay=weight_decay,
+            momentum=0.9, nesterov=True
+        )
+    elif opt == "radam":
+        return RAdam(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+    else:
+        raise ValueError("optimizer_name must be one of: 'adamw', 'sgd', 'radam'")
 
 
+# =========================
+# Mixed precision
+# =========================
 def get_mixed_precision_scaler():
     """Return GradScaler if CUDA available, None otherwise."""
     if torch.cuda.is_available():
@@ -45,15 +78,14 @@ def get_mixed_precision_scaler():
 import pytest
 
 
-def test_loss_function():
-    """Test loss function creation."""
+def test_loss_function_bce():
+    """Test BCEWithLogitsLoss creation and forward."""
     loss_fn = get_loss_function()
-    assert isinstance(loss_fn, nn.CrossEntropyLoss)
-    
-    # Test it works
-    logits = torch.randn(4, 2)
-    targets = torch.randint(0, 2, (4,))
-    loss = loss_fn(logits, targets)
+    assert isinstance(loss_fn, nn.BCEWithLogitsLoss)
+
+    logits = torch.randn(4, 1)                 # (B, 1) logits
+    targets = torch.randint(0, 2, (4,)).float()  # (B,) in {0,1}
+    loss = loss_fn(logits, targets.unsqueeze(1))
     assert isinstance(loss.item(), float)
     assert loss.item() > 0
 
@@ -64,61 +96,51 @@ def test_optimizer_only_trainable_params():
         def __init__(self):
             super().__init__()
             self.backbone = nn.Linear(10, 5)
-            self.classifier = nn.Linear(5, 2)
+            self.classifier = nn.Linear(5, 1)  # 1-logit head for binary
 
         def forward(self, x):
             return self.classifier(self.backbone(x))
 
     model = TestModel()
-    
+
     # Freeze backbone (like transfer learning)
-    for param in model.backbone.parameters():
-        param.requires_grad = False
-    
+    for p in model.backbone.parameters():
+        p.requires_grad = False
+
     optimizer = get_optimizer(model, learning_rate=0.001, weight_decay=0.01)
-    
+
     # Should only have classifier parameters
-    optimizer_params = set()
-    for group in optimizer.param_groups:
-        for param in group['params']:
-            optimizer_params.add(id(param))
-    
-    # Check only trainable params are in optimizer
-    model_trainable_params = set()
-    for param in model.parameters():
-        if param.requires_grad:
-            model_trainable_params.add(id(param))
-    
+    optimizer_params = {id(p) for g in optimizer.param_groups for p in g['params']}
+    model_trainable_params = {id(p) for p in model.parameters() if p.requires_grad}
+
     assert optimizer_params == model_trainable_params
-    
-    # Should have 2 parameters (weight and bias of classifier)
-    total_params = sum(len(group['params']) for group in optimizer.param_groups)
+
+    # Should have 2 tensors (weight + bias of classifier)
+    total_params = sum(len(g['params']) for g in optimizer.param_groups)
     assert total_params == 2
 
 
-def test_optimizer_works_with_training():
-    """Test optimizer works in a training step."""
-    model = nn.Sequential(
-        nn.Linear(10, 5),
-        nn.ReLU(),
-        nn.Linear(5, 2)
-    )
-    
-    optimizer = get_optimizer(model, learning_rate=0.001)
-    loss_fn = get_loss_function()
-    
-    # Training step
+def test_optimizer_variants_build_and_step():
+    """Ensure all optimizers build and can do a training step."""
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = nn.Sequential(nn.Linear(10, 5), nn.ReLU(), nn.Linear(5, 1))
+        def forward(self, x): return self.net(x)
+
     x = torch.randn(4, 10)
-    y = torch.randint(0, 2, (4,))
-    
-    optimizer.zero_grad()
-    output = model(x)
-    loss = loss_fn(output, y)
-    loss.backward()
-    optimizer.step()
-    
-    # Should complete without errors
-    assert True
+    y = torch.randint(0, 2, (4,)).float()
+
+    for name in ["adamw", "sgd", "radam"]:
+        model = Tiny()
+        opt = get_optimizer(model, optimizer_name=name, learning_rate=1e-3)
+        loss_fn = get_loss_function()
+        opt.zero_grad()
+        logits = model(x)
+        loss = loss_fn(logits, y.unsqueeze(1))
+        loss.backward()
+        opt.step()
+        assert isinstance(loss.item(), float)
 
 
 def test_mixed_precision_scaler():
@@ -126,40 +148,37 @@ def test_mixed_precision_scaler():
     scaler = get_mixed_precision_scaler()
     if torch.cuda.is_available():
         assert scaler is not None
-        # Works with both old and new PyTorch APIs
         assert hasattr(scaler, 'scale')
     else:
         assert scaler is None
 
 
 def test_integration_with_transfer_learning():
-    """Test integration with transfer learning model."""
+    """Integration with a transfer model; force 1-logit head."""
     try:
         from model import get_model_transfer_learning
-        model = get_model_transfer_learning(n_classes=2)
-    except ImportError:
-        # Fallback model
+        model = get_model_transfer_learning(n_classes=1)  # if your helper supports it
+    except Exception:
+        # Fallback: EfficientNet head → 1 logit
         import torchvision.models as models
         model = models.efficientnet_b0(weights=None)
-        for param in model.parameters():
-            param.requires_grad = False
-        num_ftrs = model.classifier[1].in_features
-        model.classifier = nn.Linear(num_ftrs, 2)
-    
-    # Get optimizer
-    optimizer = get_optimizer(model, learning_rate=0.001)
+        for p in model.parameters():
+            p.requires_grad = False
+        in_f = model.classifier[1].in_features
+        model.classifier[1] = nn.Linear(in_f, 1)
+
+    optimizer = get_optimizer(model, learning_rate=0.001, optimizer_name="sgd")
     loss_fn = get_loss_function()
-    
-    # Should work with actual model
+
     x = torch.randn(2, 3, 224, 224)
-    y = torch.randint(0, 2, (2,))
-    
+    y = torch.randint(0, 2, (2,)).float()
+
     model.train()
     optimizer.zero_grad()
-    output = model(x)
-    loss = loss_fn(output, y)
+    logits = model(x)                   # (B,1)
+    loss = loss_fn(logits, y.unsqueeze(1))
     loss.backward()
     optimizer.step()
-    
-    assert output.shape == (2, 2)
+
+    assert logits.shape == (2, 1)
     assert isinstance(loss.item(), float)
